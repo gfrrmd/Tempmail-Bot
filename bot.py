@@ -2,30 +2,24 @@ import os
 import time
 import requests
 import logging
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# Setup Logging agar kita bisa lihat error di Railway Logs
+# Logging untuk melihat error di Railway
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 BASE_URL = "https://api.mail.tm"
 
-# --- FUNGSI HELPER MAIL.TM ---
 def get_domains():
     try:
-        res = requests.get(f"{BASE_URL}/domains").json()
+        res = requests.get(f"{BASE_URL}/domains", timeout=10).json()
         return res['hydra:member'][0]['domain']
-    except Exception as e:
-        logging.error(f"Error get domain: {e}")
+    except:
         return None
 
-# --- HANDLER BOT ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "✨ **Bot Temporary Email** ✨\n\n"
-        "Gunakan bot ini untuk menerima email tanpa ribet.\n"
-        "Klik tombol di bawah untuk membuat email baru."
-    )
+    text = "👋 **Temp Mail Bot**\nKlik tombol untuk buat email."
     keyboard = [[InlineKeyboardButton("📧 Generate Email", callback_data="gen_email")]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -36,45 +30,31 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "gen_email":
         domain = get_domains()
         if not domain:
-            await query.edit_message_text("❌ Gagal mengambil domain. Coba lagi.")
+            await query.edit_message_text("❌ Domain tidak tersedia.")
             return
 
         user_id = query.from_user.id
-        # Buat username unik
-        username = f"user{user_id}{int(time.time())}"[-15:]
+        username = f"u{user_id}{int(time.time())}"[-15:]
         email = f"{username}@{domain}"
-        password = "password123"
+        password = "pass_user_123"
 
-        # Daftar Akun
         reg = requests.post(f"{BASE_URL}/accounts", json={"address": email, "password": password})
         
         if reg.status_code == 201:
-            # Ambil Token
             token_res = requests.post(f"{BASE_URL}/token", json={"address": email, "password": password}).json()
-            token = token_res['token']
-            
-            # Simpan data sementara di user_data
             context.user_data['email'] = email
-            context.user_data['token'] = token
+            context.user_data['token'] = token_res['token']
 
-            msg = (
-                f"✅ **Email Berhasil Dibuat!**\n\n"
-                f"📧 ` {email} `\n"
-                f"🔑 Password: `{password}`\n\n"
-                "Menunggu email masuk... Klik refresh jika sudah mengirim email."
-            )
-            keyboard = [
-                [InlineKeyboardButton("🔄 Refresh Inbox", callback_data="check_inbox")],
-                [InlineKeyboardButton("🆕 Buat Email Baru", callback_data="gen_email")]
-            ]
-            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+            msg = f"✅ **Email Dibuat!**\n\n`{email}`\n\nKlik Refresh untuk cek pesan."
+            btns = [[InlineKeyboardButton("🔄 Refresh", callback_data="check_inbox")]]
+            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(btns), parse_mode="Markdown")
         else:
-            await query.edit_message_text("❌ Gagal mendaftar. Coba lagi.")
+            await query.edit_message_text("❌ Gagal daftar akun.")
 
     elif query.data == "check_inbox":
         token = context.user_data.get('token')
         if not token:
-            await query.message.reply_text("Silakan buat email dulu!")
+            await query.message.reply_text("Buat email dulu!")
             return
 
         headers = {"Authorization": f"Bearer {token}"}
@@ -82,38 +62,21 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         messages = res.get('hydra:member', [])
 
         if not messages:
-            await query.message.reply_text("📭 Belum ada email masuk.")
+            await query.message.reply_text("📭 Inbox kosong.")
         else:
-            for m in messages[:3]: # Tampilkan 3 email terakhir
+            for m in messages[:2]:
                 m_id = m['id']
                 detail = requests.get(f"{BASE_URL}/messages/{m_id}", headers=headers).json()
-                
-                info = (
-                    f"📩 **Pesan Masuk**\n"
-                    f"Dari: {m['from']['address']}\n"
-                    f"Subjek: {m['subject']}\n"
-                    f"---\n{detail['text']}"
-                )
-                await query.message.reply_text(info)
-
-# --- EKSEKUSI UTAMA ---
-def main():
-    # Ambil token dari Environment Variable di Railway
-    token_bot = os.getenv("BOT_TOKEN")
-
-    if not token_bot:
-        print("ERROR: BOT_TOKEN tidak ditemukan di Variable Railway!")
-        return
-
-    # Inisialisasi Aplikasi (v20+)
-    app = Application.builder().token(token_bot).build()
-
-    # Tambahkan Handler
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_buttons))
-
-    print("Bot sedang berjalan...")
-    app.run_polling()
+                await query.message.reply_text(f"📩 **Dari:** {m['from']['address']}\n**Subjek:** {m['subject']}\n\n{detail['text']}")
 
 if __name__ == '__main__':
-    main()
+    token_bot = os.getenv("BOT_TOKEN")
+    if not token_bot:
+        print("Variable BOT_TOKEN kosong!")
+    else:
+        # Inisialisasi v21.x
+        app = Application.builder().token(token_bot).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CallbackQueryHandler(handle_buttons))
+        print("Bot Aktif...")
+        app.run_polling(drop_pending_updates=True)
