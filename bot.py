@@ -1,71 +1,80 @@
 import os
 import time
 import requests
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# Konfigurasi API Mail.tm
+# Setup Logging agar kita bisa lihat error di Railway Logs
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
 BASE_URL = "https://api.mail.tm"
 
-# Fungsi untuk mengambil domain yang tersedia
+# --- FUNGSI HELPER MAIL.TM ---
 def get_domains():
     try:
         res = requests.get(f"{BASE_URL}/domains").json()
         return res['hydra:member'][0]['domain']
-    except:
-        return "tempmail.com"
+    except Exception as e:
+        logging.error(f"Error get domain: {e}")
+        return None
 
-# Perintah /start
+# --- HANDLER BOT ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_text = (
-        "👋 **Halo! Selamat datang di Temp Mail Bot.**\n\n"
-        "Saya bisa membuatkan email sementara untukmu agar inbox aslimu tetap bersih dari spam."
+    text = (
+        "✨ **Bot Temporary Email** ✨\n\n"
+        "Gunakan bot ini untuk menerima email tanpa ribet.\n"
+        "Klik tombol di bawah untuk membuat email baru."
     )
-    keyboard = [[InlineKeyboardButton("📧 Generate Email Baru", callback_data="gen_email")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+    keyboard = [[InlineKeyboardButton("📧 Generate Email", callback_data="gen_email")]]
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-# Logika penanganan tombol
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    # Tombol Buat Email
     if query.data == "gen_email":
         domain = get_domains()
-        user_id = query.from_user.id
-        # Membuat username unik berdasarkan ID user dan waktu
-        username = f"user_{user_id}_{int(time.time())}"[-15:] 
-        email = f"{username}@{domain}"
-        password = "password_rahasia_123"
+        if not domain:
+            await query.edit_message_text("❌ Gagal mengambil domain. Coba lagi.")
+            return
 
-        # 1. Daftarkan Akun ke Mail.tm
-        reg_res = requests.post(f"{BASE_URL}/accounts", json={"address": email, "password": password})
+        user_id = query.from_user.id
+        # Buat username unik
+        username = f"user{user_id}{int(time.time())}"[-15:]
+        email = f"{username}@{domain}"
+        password = "password123"
+
+        # Daftar Akun
+        reg = requests.post(f"{BASE_URL}/accounts", json={"address": email, "password": password})
         
-        if reg_res.status_code == 201:
-            # 2. Ambil Token Akses
+        if reg.status_code == 201:
+            # Ambil Token
             token_res = requests.post(f"{BASE_URL}/token", json={"address": email, "password": password}).json()
             token = token_res['token']
             
-            # Simpan data di memori bot (sementara)
+            # Simpan data sementara di user_data
             context.user_data['email'] = email
             context.user_data['token'] = token
 
-            text = f"✅ **Email Berhasil Dibuat!**\n\n📧 Address: `{email}`\n🔑 Password: `{password}`\n\n*Silakan kirim email ke alamat di atas, lalu tekan tombol Refresh.*"
+            msg = (
+                f"✅ **Email Berhasil Dibuat!**\n\n"
+                f"📧 ` {email} `\n"
+                f"🔑 Password: `{password}`\n\n"
+                "Menunggu email masuk... Klik refresh jika sudah mengirim email."
+            )
             keyboard = [
                 [InlineKeyboardButton("🔄 Refresh Inbox", callback_data="check_inbox")],
-                [InlineKeyboardButton("🆕 Buat Baru", callback_data="gen_email")]
+                [InlineKeyboardButton("🆕 Buat Email Baru", callback_data="gen_email")]
             ]
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         else:
-            await query.edit_message_text("❌ Gagal membuat email. Coba lagi nanti.")
+            await query.edit_message_text("❌ Gagal mendaftar. Coba lagi.")
 
-    # Tombol Cek Pesan Masuk
     elif query.data == "check_inbox":
         token = context.user_data.get('token')
         if not token:
-            await query.message.reply_text("Silakan generate email terlebih dahulu.")
+            await query.message.reply_text("Silakan buat email dulu!")
             return
 
         headers = {"Authorization": f"Bearer {token}"}
@@ -73,33 +82,38 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         messages = res.get('hydra:member', [])
 
         if not messages:
-            await query.message.reply_text("📭 Inbox masih kosong.")
+            await query.message.reply_text("📭 Belum ada email masuk.")
         else:
-            for m in messages[:3]: # Ambil 3 email terbaru saja
-                # Ambil detail isi pesan
+            for m in messages[:3]: # Tampilkan 3 email terakhir
                 m_id = m['id']
                 detail = requests.get(f"{BASE_URL}/messages/{m_id}", headers=headers).json()
                 
-                msg_box = (
-                    f"📩 **Pesan Baru!**\n"
-                    f"👤 **Dari:** {m['from']['address']}\n"
-                    f"📝 **Subjek:** {m['subject']}\n"
-                    f"📅 **Waktu:** {m['createdAt']}\n\n"
-                    f"📄 **Isi:**\n{detail['text'] or 'Hanya tersedia format HTML'}"
+                info = (
+                    f"📩 **Pesan Masuk**\n"
+                    f"Dari: {m['from']['address']}\n"
+                    f"Subjek: {m['subject']}\n"
+                    f"---\n{detail['text']}"
                 )
-                await query.message.reply_text(msg_box, parse_mode="Markdown")
+                await query.message.reply_text(info)
 
-# Menjalankan Bot
+# --- EKSEKUSI UTAMA ---
+def main():
+    # Ambil token dari Environment Variable di Railway
+    token_bot = os.getenv("BOT_TOKEN")
+
+    if not token_bot:
+        print("ERROR: BOT_TOKEN tidak ditemukan di Variable Railway!")
+        return
+
+    # Inisialisasi Aplikasi (v20+)
+    app = Application.builder().token(token_bot).build()
+
+    # Tambahkan Handler
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(handle_buttons))
+
+    print("Bot sedang berjalan...")
+    app.run_polling()
+
 if __name__ == '__main__':
-    # Token diambil dari Environment Variable Railway
-    TOKEN_TELEGRAM = os.getenv("BOT_TOKEN")
-    
-    if not TOKEN_TELEGRAM:
-        print("Error: BOT_TOKEN tidak ditemukan di Environment Variables!")
-    else:
-        app = Application.builder().token(TOKEN_TELEGRAM).build()
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CallbackQueryHandler(handle_callback))
-        
-        print("Bot sedang berjalan...")
-        app.run_polling()
+    main()
